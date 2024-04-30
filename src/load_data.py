@@ -12,11 +12,15 @@ local_path: Path = Path(__file__).parent
 logger: logging.Logger = logging.getLogger(__name__)
 
 
+def get_all_tags(path: str) -> List[str]:
+    df = pd.read_csv(path, index_col=0)
+    tags = df.columns.tolist()
+    return tags
+
+
 def get_target_labels(labels: List[str], index: List[str]) -> np.ndarray:
-    print("-".join(str(labels[0]).split("-")[1:-1]))
     collect_labels = ["-".join(str(k).split("-")[1:-1])
                       for k in labels if "-".join(str(k).split("-")[1:-1]) in index]
-    print(f"labels: {collect_labels}    \nlength of labels: {len(collect_labels)}")
     return collect_labels
 
 
@@ -31,30 +35,47 @@ def load_keys(path: str, filter_key: Optional[str] = None) -> List[bytes]:
     return my_list
 
 
-def get_embed_by_key(path: str, key: str) -> Optional[np.ndarray]:
+def get_embed_by_key(path: str, key: str, dtype: Optional[np.dtype] = None) -> Optional[np.ndarray]:
     output = None
     with lmdb.open(path, readonly=True) as env:
         value = env.begin().get(key)
-        if value:
-            output = np.frombuffer(bytearray(value), dtype=np.float32)
+        if value and dtype:
+            output = np.frombuffer(bytearray(value), dtype=dtype)
+        elif dtype is None:
+            output = value.replace(b'\x00', b'').decode()
     return output
+
+
+def match_key(labels: List[str], key: str) -> List[str]:
+    return [k for k in labels if key in str(k)]
 
 
 class LMDBDataset(Dataset):
     def __init__(self, path_data: str, path_target: str, filter_key: str = 'embed'):
         self.path_data = path_data
+        self.texts = load_keys(path_data, filter_key="texts")
         self.keys = load_keys(path_data, filter_key=filter_key)
         self.target = pd.read_csv(path_target, index_col=0)
+        self.all_tags = self.target.columns.tolist()
         self.labels = get_target_labels(self.keys, self.target.index)
         self.target = self.target.loc[self.labels]
-        # self.values = np.stack([get_by_key(path_data, k) for k in self.keys])
-        # self.y = get_targets(self.target, self.keys)
+
+    def get_text(self, index: int) -> str:
+        key = self.labels[index]
+        value = match_key(self.texts, key)
+        text = get_embed_by_key(self.path_data, value[0], None)
+        return text
+    
+    def get_tags(self, target:List[float]) -> List[str]:
+        idx = np.where(target > 0.)[0]
+        tags = [self.all_tags[i] for i in idx]
+        return tags
 
     def __len__(self):
         return len(self.keys)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        value = get_embed_by_key(self.path_data, self.keys[index])
+        value = get_embed_by_key(self.path_data, self.keys[index], dtype=np.float32)
         target = self.target.loc[self.labels[index]]
         x = torch.from_numpy(value)
         y = torch.from_numpy(target.values.astype(np.float32))

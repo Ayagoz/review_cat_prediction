@@ -1,6 +1,6 @@
 import torch
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
 
 import argparse
 from datetime import datetime
@@ -16,16 +16,23 @@ logger = logging.getLogger(__name__)
 # Define your model architecture
 
 
-class MyModel(nn.Module):
-    def __init__(self):
-        super(MyModel, self).__init__()
+class SmallModel(nn.Module):
+    def __init__(self, params: dict = {}):
+        super(SmallModel, self).__init__()
         # Define your layers here
+        self.params = params
         self.model = nn.Sequential(
             nn.ReLU(),
             nn.Linear(768, 2454),
             nn.Sigmoid()
 
         )
+
+    def get_params(self) -> dict:
+        return {
+            'model_name': self.__class__.__name__,
+            'params': self.params
+        }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Define the forward pass of your model
@@ -88,6 +95,39 @@ def create_data_loader(data_dir: str, target_dir: str, batch_size: int, shuffle:
     return data_loader
 
 
+def optimizer_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> torch.optim.Optimizer:
+    optim_state = optimizer.state_dict()
+    # Convert to CPU
+    for state in optim_state["state"].values():
+        for k, v in state.items():
+            state[k] = v.to(device)
+    return optim_state
+
+
+def save_model(model: nn.Module, path: str, optimizer: Optional[torch.optim.Optimizer] = None) -> None:
+    state = {
+        'model_name': model.__class__.__name__,
+        'params': model.get_params(),
+        'nn_state_dict': model.to('cpu').state_dict()
+    }
+    if optimizer is not None:
+        state['optimizer_state_dict'] = optimizer_to_device(optimizer, torch.device('cpu'))
+
+    torch.save(state, path)
+    print(f"Model saved to '{path}'")
+
+
+def load_model(path: str, load_optimizer: bool = False) -> Tuple[nn.Module, torch.optim.Optimizer]:
+    state = torch.load(path)
+    model = SmallModel()
+    model.load_state_dict(state['nn_state_dict'])
+    if load_optimizer:
+        optimizer = torch.optim.Adam(model.parameters())
+        optimizer.load_state_dict(state['optimizer_state_dict'])
+        return model, optimizer
+    return model
+
+
 def main():
     # Create argument parser
 
@@ -99,7 +139,7 @@ def main():
     train_loader = create_data_loader(args.data_path, args.target_path, args.batch_size)
 
     # Create the model
-    model = MyModel()
+    model = SmallModel()
 
     # Define the loss function and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -110,8 +150,10 @@ def main():
           train_loader, tb_writer=writer, epochs=args.epochs)
 
     # Evaluate the model
-    test_accuracy, test_loss = evaluate(model, criterion, train_loader, writer, epoch=1, label="test")
+    test_accuracy, test_loss = evaluate(
+        model, criterion, train_loader, writer, epoch=1, label="test")
     print(f"Test Accuracy: {test_accuracy:.2f}%, Test Loss: {test_loss:.4f}")
+    save_model(model, f'{args.model_path}/model_{timestamp}.pt', optimizer=optimizer)
 
 
 def parse_args():
@@ -120,6 +162,7 @@ def parse_args():
                         help='Path to the data directory')
     parser.add_argument('--target_path', type=str)
     parser.add_argument('--logs_path', type=str)
+    parser.add_argument('--model_path', type=str)
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
